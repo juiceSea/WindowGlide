@@ -69,6 +69,16 @@ def mouse(flags, x=0, y=0):
     time.sleep(0.05)
 
 
+def gesture_config_arguments(name, modifier="Alt"):
+    """Keep desktop tests independent of the user's selected gesture key."""
+    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
+    config["drag_modifier"] = modifier
+    path = ROOT / "test-results" / f"{name}-config.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return ["--config", str(path)]
+
+
 def run():
     w.dpi_awareness()
     if w.FindWindow(w.CLASS_NAME, None):
@@ -93,7 +103,7 @@ def run():
         w.SetForegroundWindow(hwnd)
         wait_for(lambda: w.GetForegroundWindow() == hwnd, "fixture foreground")
         with log_file.open("w", encoding="utf-8") as output:
-            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "45"],
+            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "45"] + gesture_config_arguments("move"),
                                    stdout=output, stderr=output)
             wait_for(lambda: "READY" in log_file.read_text(encoding="utf-8"), "application ready")
 
@@ -229,7 +239,7 @@ def run():
             results.append("Ctrl+Win+Alt+Q exits and releases hooks")
 
             # Start a fresh instance, then exit while dragging.
-            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "30"],
+            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "30"] + gesture_config_arguments("move"),
                                    stdout=output, stderr=output)
             wait_for(lambda: log_file.read_text(encoding="utf-8").count("READY") == 2, "second instance ready")
             w.SetWindowPos(hwnd, None, 200, 160, 640, 440, 0x4 | 0x10)

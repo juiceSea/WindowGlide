@@ -1,4 +1,4 @@
-"""Neutral menu-mask input; never suppress or replay a real Alt release.
+"""Neutral Alt/Win menu-mask input; never suppress or replay a real release.
 
 VK E8 is documented as unassigned by Microsoft and used as a menu mask by
 AutoHotkey. Pairing down/up prevents a latched synthetic key. The private
@@ -37,6 +37,7 @@ send_input = w.bind(w.user32, "SendInput", W.UINT, W.UINT, C.POINTER(INPUT), C.c
 
 
 def mask_alt_menu():
+    """Mask Alt's menu or Win's Start menu with the same neutral key pair."""
     events = (INPUT * 2)(
         INPUT(type=1, ki=KEYBDINPUT(wVk=MENU_MASK_VK, dwExtraInfo=MENU_MASK_MARKER)),
         INPUT(type=1, ki=KEYBDINPUT(wVk=MENU_MASK_VK, dwFlags=2, dwExtraInfo=MENU_MASK_MARKER)),

@@ -147,5 +147,113 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.hooks._keyboard(0, w.WM_KEYUP, C.addressof(event)), 1)
 
 
+class WinHookTests(unittest.TestCase):
+    mouse = HookTests.mouse
+    key = HookTests.key
+
+    def setUp(self):
+        self.hooks = Hooks(123, queue.SimpleQueue(), drag_modifier="Win")
+        self.hooks.submit = Mock()
+        self.physical_down = {0x5B}
+        for name, result in (("mask_alt_menu", True), ("candidate_at", 456),
+                             ("w.key_down", False), ("w.CallNextHookEx", 0)):
+            patcher = patch(f"windowglide.hooks.{name}", return_value=result)
+            value = patcher.start()
+            self.addCleanup(patcher.stop)
+            if name == "w.key_down":
+                value.side_effect = lambda vk: vk in self.physical_down
+            elif name == "mask_alt_menu":
+                self.mask = value
+
+    def test_both_win_keys_move_resize_and_all_endings_mask_then_reset(self):
+        for vk in (0x5B, 0x5C):
+            for down, up in ((w.WM_LBUTTONDOWN, w.WM_LBUTTONUP), (w.WM_RBUTTONDOWN, w.WM_RBUTTONUP)):
+                for ending in ("mouse", "modifier", "escape", "click", "reset"):
+                    with self.subTest(vk=vk, button=down, ending=ending):
+                        self.physical_down = {vk}
+                        self.mask.reset_mock()
+                        self.hooks.submit.reset_mock()
+                        self.assertEqual(self.key(vk), 0)
+                        self.assertEqual(self.mouse(down), 1)
+                        self.assertEqual(self.hooks.gesture.kind, "move" if down == w.WM_LBUTTONDOWN else "resize")
+                        if ending != "click":
+                            self.mouse(w.WM_MOUSEMOVE, 330, 330)
+                            self.assertTrue(self.hooks.gesture.started)
+                        self.key(vk)  # auto-repeat must retain the masking decision
+                        if ending == "modifier":
+                            self.assertEqual(self.key(vk, True), 0)
+                            self.assertIsNone(self.hooks.gesture)
+                        elif ending == "escape":
+                            self.assertEqual(self.key(w.VK_ESCAPE), 1)
+                            self.assertEqual(self.key(w.VK_ESCAPE, True), 1)
+                            self.assertIsNone(self.hooks.gesture)
+                        elif ending == "reset":
+                            self.hooks.gesture = None  # controller cancels a rejected/closed target
+                        self.assertEqual(self.mouse(up), 1)
+                        if ending != "modifier":
+                            self.assertEqual(self.key(vk, True), 0)
+                        self.mask.assert_called_once()
+                        self.assertIsNone(self.hooks.gesture)
+                        self.key(vk)
+                        self.key(vk, True)
+                        self.mask.assert_called_once()  # next plain Win must remain native
+
+    def test_plain_win_and_win_e_pass_through_without_mask(self):
+        for vk in (0x5B, 0x5C):
+            for key in (vk, ord("E")):
+                self.assertEqual(self.key(key), 0)
+            for key in (ord("E"), vk):
+                self.assertEqual(self.key(key, True), 0)
+            self.key(vk)
+            self.key(vk, True)
+        self.mask.assert_not_called()
+
+    def test_wrong_or_extra_modifiers_do_not_start_gestures(self):
+        for keys in ({w.VK_MENU}, set(), {0x5B, w.VK_MENU}, {0x5B, 0x10}, {0x5C, 0x11}):
+            self.physical_down = keys
+            for button in (w.WM_LBUTTONDOWN, w.WM_RBUTTONDOWN):
+                self.assertEqual(self.mouse(button), 0)
+                self.assertIsNone(self.hooks.gesture)
+        self.mask.assert_not_called()
+
+    def test_nonselected_alt_release_does_not_end_win_drag(self):
+        self.key(0x5B)
+        self.mouse(w.WM_LBUTTONDOWN)
+        self.key(w.VK_LMENU)
+        self.key(w.VK_LMENU, True)
+        self.assertIsNotNone(self.hooks.gesture)
+        self.mask.assert_not_called()
+
+    def test_both_win_keys_remain_masked_until_both_released(self):
+        self.key(0x5B)
+        self.mouse(w.WM_LBUTTONDOWN)
+        self.mouse(w.WM_LBUTTONUP)
+        self.key(0x5C)
+        self.key(0x5B, True)
+        self.key(0x5C, True)
+        self.assertEqual(self.mask.call_count, 2)
+        self.key(0x5B)
+        self.key(0x5B, True)
+        self.assertEqual(self.mask.call_count, 2)
+
+    def test_rejected_target_preserves_native_input(self):
+        with patch("windowglide.hooks.candidate_at", return_value=None):
+            self.key(0x5B)
+            self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 0)
+            self.assertEqual(self.mouse(w.WM_LBUTTONUP), 0)
+            self.key(0x5B, True)
+        self.mask.assert_not_called()
+
+    def test_failed_mask_passes_real_win_release_and_reports_failure(self):
+        self.key(0x5B)
+        self.mouse(w.WM_RBUTTONDOWN)
+        self.mouse(w.WM_RBUTTONUP)
+        self.mask.return_value = False
+        self.assertEqual(self.key(0x5B, True), 0)
+        self.assertEqual(self.hooks.submit.call_args.args[0], "mask_failed")
+        self.assertFalse(self.hooks.modifier_keys_down)
+        self.assertFalse(self.hooks.mask_modifier_on_release)
+
+
 if __name__ == "__main__":
     unittest.main()

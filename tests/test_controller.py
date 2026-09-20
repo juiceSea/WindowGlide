@@ -4,10 +4,34 @@ import unittest
 from unittest.mock import Mock, patch
 
 from windowglide.app import Application, Session
+from windowglide.config import VisualSettings
 from windowglide.window_manager import Movement, Target
 
 
 class ControllerTests(unittest.TestCase):
+    def test_watchdog_tracks_selected_modifier_including_both_win_keys(self):
+        for modifier, held in (("Alt", 0x12), ("Win", 0x5B), ("Win", 0x5C)):
+            with self.subTest(modifier=modifier, held=held):
+                self.app.settings = VisualSettings(drag_modifier=modifier)
+                self.app.session.foreground = 456
+                with patch.object(Target, "alive", return_value=True), \
+                     patch("windowglide.app.w.IsIconic", return_value=False), \
+                     patch("windowglide.app.w.IsHungAppWindow", return_value=False), \
+                     patch("windowglide.app.w.GetForegroundWindow", return_value=456), \
+                     patch("windowglide.app.w.key_down", side_effect=lambda vk: vk == held), \
+                     patch.object(self.app, "_sync_feedback") as feedback, \
+                     patch.object(self.app, "finish") as finish:
+                    self.app._watchdog()
+                    finish.assert_not_called()
+                    feedback.assert_called_once()
+                with patch.object(Target, "alive", return_value=True), \
+                     patch("windowglide.app.w.IsIconic", return_value=False), \
+                     patch("windowglide.app.w.IsHungAppWindow", return_value=False), \
+                     patch("windowglide.app.w.key_down", return_value=False), \
+                     patch.object(self.app, "finish") as finish:
+                    self.app._watchdog()
+                    finish.assert_called_once_with("modifier no longer held")
+
     def setUp(self):
         self.app = Application()
         self.app.hwnd = 123
@@ -50,6 +74,25 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(self.app.session)
         self.app.manager.begin_move.assert_not_called()
         self.app.hooks.reset.assert_called_once_with(2)
+
+    def test_deferred_shortcut_rechecks_focus_identity_and_pending_animation(self):
+        self.app.window_actions = Mock(pending=None)
+        with patch.object(Target, "alive", return_value=True), \
+             patch("windowglide.app.w.GetForegroundWindow", return_value=789):
+            self.app._command(("deferred_shortcut", "minimize", 456, 10, 20))
+        self.app.window_actions.execute.assert_not_called()
+        with patch.object(Target, "alive", return_value=False), \
+             patch("windowglide.app.w.GetForegroundWindow", return_value=456):
+            self.app._command(("deferred_shortcut", "minimize", 456, 10, 20))
+        self.app.window_actions.execute.assert_not_called()
+        with patch.object(Target, "alive", return_value=True), \
+             patch("windowglide.app.w.GetForegroundWindow", return_value=456):
+            self.app.window_actions.pending = object()
+            self.app._command(("deferred_shortcut", "minimize", 456, 10, 20))
+            self.app.window_actions.execute.assert_not_called()
+            self.app.window_actions.pending = None
+            self.app._command(("deferred_shortcut", "minimize", 456, 10, 20))
+        self.app.window_actions.execute.assert_called_once_with("minimize", 456)
 
 
 if __name__ == "__main__":

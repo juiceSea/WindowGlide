@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor
+from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor, gesture_config_arguments
 from windowglide.window_manager import rect, visible_rect
 from windowglide import visual_win32 as v
 from windowglide.overlay import BORDER_CLASS, GLASS_CLASS
@@ -31,7 +31,7 @@ def run(overlays_only=False, theme=False):
     destination.mkdir(exist_ok=True)
     app_log = destination / "visual-app.log"
     results = []
-    extra_arguments = []
+    extra_arguments = gesture_config_arguments("visual")
     expected_color = (124, 155, 197)
     expected_width = load_config(ROOT / "config.json").border_width
     if theme:

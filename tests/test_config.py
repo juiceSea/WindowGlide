@@ -7,6 +7,17 @@ from windowglide.config import VisualSettings, load_config
 
 
 class VisualConfigTests(unittest.TestCase):
+    def test_drag_modifier_is_explicit_and_old_configs_keep_alt(self):
+        self.assertEqual(VisualSettings().drag_modifier, "Alt")
+        for modifier in ("Alt", "Win"):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({"drag_modifier": modifier}), encoding="utf-8")
+                self.assertEqual(load_config(path).drag_modifier, modifier)
+        for value in (None, True, 1, [], {}, "Ctrl", "win", "Alt+Win"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                VisualSettings(drag_modifier=value)
+
     def test_missing_config_is_created_with_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

@@ -1,4 +1,4 @@
-"""Validated visual settings, loaded once at startup."""
+"""Validated gesture, visual and shortcut settings, loaded once at startup."""
 
 from dataclasses import asdict, dataclass, fields
 import json
@@ -9,6 +9,7 @@ import re
 
 @dataclass(frozen=True)
 class VisualSettings:
+    drag_modifier: str = "Alt"
     border_width: float = 3
     border_color: str = "#7C9BC5"
     use_windows_accent_color: bool = False
@@ -24,6 +25,8 @@ class VisualSettings:
     shortcut_maximize: str = "Ctrl+Win+Alt+M"
 
     def __post_init__(self):
+        if self.drag_modifier not in ("Alt", "Win"):
+            raise ValueError('drag_modifier must be "Alt" or "Win"')
         for name, low, high in (("border_width", 1, 20), ("glass_opacity", 0, 1), ("corner_radius", 0, 32)):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:

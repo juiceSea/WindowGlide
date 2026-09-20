@@ -4,6 +4,7 @@ import ctypes as C
 from ctypes import wintypes as W
 from dataclasses import dataclass
 import threading
+import time
 
 from . import win32 as w
 from .window_manager import candidate_at, window_class
@@ -20,13 +21,31 @@ class Gesture:
     kind: str = "move"
 
 
+@dataclass
+class DeferredShortcut:
+    action: str
+    hwnd: int
+    pid: int
+    tid: int
+    keys: frozenset[int]
+    deadline: float
+    ready_at: float | None = None
+
+
 class Hooks(threading.Thread):
-    def __init__(self, control_hwnd, commands, test_input=False, shortcuts=None):
+    def __init__(self, control_hwnd, commands, test_input=False, shortcuts=None, drag_modifier="Alt"):
         super().__init__(name="InputHook", daemon=True)
+        if drag_modifier not in ("Alt", "Win"):
+            raise ValueError('drag_modifier must be "Alt" or "Win"')
+        self.drag_modifier = drag_modifier
+        self.modifier_keys = (w.VK_MENU, w.VK_LMENU, w.VK_RMENU) if drag_modifier == "Alt" else (0x5B, 0x5C)
+        self.excluded_modifiers = (0x11, 0x10, 0x5B, 0x5C) if drag_modifier == "Alt" else (0x11, 0x10, w.VK_MENU)
         self.control_hwnd, self.commands = control_hwnd, commands
         self.test_input = test_input
         self.shortcuts = ShortcutMatcher(shortcuts or {})
         self.shortcut_mask = False
+        self.deferred_shortcut = None
+        self.shortcut_timer = None
         self.ready = threading.Event()
         self.error = None
         self.tid = None
@@ -37,9 +56,9 @@ class Hooks(threading.Thread):
         self.eat_escape_up = False
         self.latest_position = None
         self.motion_pending = False
-        # This belongs to the entire Alt press, not the lifetime of a mouse gesture.
-        self.mask_alt_on_release = False
-        self.alt_keys_down = set()
+        # Keep masking until the whole modifier press ends, even after Esc/reset.
+        self.mask_modifier_on_release = False
+        self.modifier_keys_down = set()
         self.drag_x = max(4, w.GetSystemMetrics(68))
         self.drag_y = max(4, w.GetSystemMetrics(69))
         # Keep callbacks alive until both hooks are unregistered.
@@ -71,6 +90,44 @@ class Hooks(threading.Thread):
             return bool(flags & injected_mask and marker == w.TEST_INPUT_MARKER)
         return not flags & injected_mask
 
+    def _clear_deferred_shortcut(self, reason=None):
+        pending, self.deferred_shortcut = self.deferred_shortcut, None
+        if self.shortcut_timer:
+            w.KillTimer(None, self.shortcut_timer)
+            self.shortcut_timer = None
+        if pending and reason:
+            self.submit("shortcut_cancelled", pending.action, reason)
+
+    def _defer_shortcut(self, action, vk):
+        # Keep the original target; never re-target after the synthetic batch.
+        hwnd = w.GetForegroundWindow()
+        pid = W.DWORD()
+        tid = w.GetWindowThreadProcessId(hwnd, C.byref(pid)) if hwnd else 0
+        if not tid:
+            return
+        self.deferred_shortcut = DeferredShortcut(
+            action, hwnd, pid.value, tid,
+            frozenset(key for key in self.shortcuts.down if key in MODIFIERS or key == vk),
+            time.monotonic() + 1.5,
+        )
+        self.shortcut_timer = w.check(w.SetTimer(None, 0, 15, None), "SetTimer(deferred shortcut)")
+
+    def _poll_deferred_shortcut(self):
+        pending = self.deferred_shortcut
+        if not pending:
+            return
+        now = time.monotonic()
+        pid = W.DWORD()
+        tid = w.GetWindowThreadProcessId(pending.hwnd, C.byref(pid))
+        if (w.GetForegroundWindow() != pending.hwnd or
+                (tid, pid.value) != (pending.tid, pending.pid)):
+            self._clear_deferred_shortcut("target or foreground changed")
+        elif now >= pending.deadline:
+            self._clear_deferred_shortcut("input release timed out")
+        elif pending.ready_at is not None and now >= pending.ready_at:
+            self._clear_deferred_shortcut()
+            self.submit("deferred_shortcut", pending.action, pending.hwnd, pending.pid, pending.tid)
+
     def _mouse(self, code, message, pointer):
         if code < 0:
             return w.CallNextHookEx(None, code, message, pointer)
@@ -85,19 +142,19 @@ class Hooks(threading.Thread):
                     # A second button cannot open a menu or switch the active gesture.
                     setattr(self, eat_attribute, True)
                     return 1
-                can_start = not (self.eat_left_up or self.eat_right_up) and w.key_down(w.VK_MENU)
+                can_start = not (self.eat_left_up or self.eat_right_up) and any(w.key_down(vk) for vk in self.modifier_keys)
                 # Avoid AltGr and other modified mouse shortcuts.
-                if can_start and not any(w.key_down(vk) for vk in (0x11, 0x10, 0x5B, 0x5C)):
+                if can_start and not any(w.key_down(vk) for vk in self.excluded_modifiers):
                     hwnd = candidate_at(event.pt.x, event.pt.y, resizing=kind == "resize")
                     if hwnd and self.test_input and window_class(hwnd) != "WindowGlide.AutomationFixture":
                         hwnd = None
                     if hwnd:
                         self.serial += 1
                         self.gesture = Gesture(self.serial, hwnd, (event.pt.x, event.pt.y), kind=kind)
-                        if kind == "resize":
-                            # Includes the inactive center: a consumed right click
-                            # must not turn into a bare-Alt menu activation later.
-                            self.mask_alt_on_release = True
+                        if kind == "resize" or self.drag_modifier == "Win":
+                            # Includes inactive resize center and Win clicks without
+                            # motion: consumed input must not activate a native menu.
+                            self.mask_modifier_on_release = True
                         self.latest_position = (self.serial, self.gesture.origin)
                         setattr(self, eat_attribute, True)
                         self.submit("armed", self.serial, hwnd, self.gesture.origin, kind)
@@ -107,7 +164,7 @@ class Hooks(threading.Thread):
                 self.latest_position = (g.serial, (event.pt.x, event.pt.y))
                 if not g.started and (abs(event.pt.x - g.origin[0]) >= self.drag_x or abs(event.pt.y - g.origin[1]) >= self.drag_y):
                     g.started = True
-                    self.mask_alt_on_release = True
+                    self.mask_modifier_on_release = True
                     self.submit("start", g.serial, (event.pt.x, event.pt.y))
                 elif g.started and not self.motion_pending:
                     self.motion_pending = True
@@ -140,26 +197,38 @@ class Hooks(threading.Thread):
             shortcut_input = event.dwExtraInfo != MENU_MASK_MARKER and (
                 not self.test_input or self._accept(event.flags, event.dwExtraInfo, 0x10))
             if shortcut_input and self.shortcuts.bindings:
+                # New input supersedes a waiting action rather than accumulating
+                # stale window commands. Auto-repeat of held keys is harmless.
+                if self.deferred_shortcut and not up and event.vkCode not in self.shortcuts.down:
+                    self._clear_deferred_shortcut("new input before dispatch")
                 consumed, action = self.shortcuts.feed(event.vkCode, up)
                 if action:
                     self.shortcut_mask = True
                     if not mask_alt_menu():
                         self.submit("mask_failed", C.get_last_error())
-                    self.submit("shortcut", action, w.GetForegroundWindow())
+                    if event.flags & 0x10:
+                        self._defer_shortcut(action, event.vkCode)
+                    else:
+                        self.submit("shortcut", action, w.GetForegroundWindow())
                 if up and self.shortcut_mask and MODIFIERS.get(event.vkCode) in ("Alt", "Win"):
                     if not mask_alt_menu():
                         self.submit("mask_failed", C.get_last_error())
                 if not any(key in MODIFIERS for key in self.shortcuts.down):
                     self.shortcut_mask = False
+                pending = self.deferred_shortcut
+                if pending and pending.ready_at is None and not pending.keys.intersection(self.shortcuts.down):
+                    # Post-release settling occurs on this thread's message loop,
+                    # after callbacks and menu-mask input, never via a hook sleep.
+                    pending.ready_at = time.monotonic() + 0.05
                 if consumed:
                     return 1
             if not self._accept(event.flags, event.dwExtraInfo, 0x10):
                 return w.CallNextHookEx(None, code, message, pointer)
-            is_alt = event.vkCode in (w.VK_MENU, w.VK_LMENU, w.VK_RMENU)
-            if is_alt and not up:
-                if not self.alt_keys_down:
-                    self.mask_alt_on_release = False
-                self.alt_keys_down.add(event.vkCode)
+            is_modifier = event.vkCode in self.modifier_keys
+            if is_modifier and not up:
+                if not self.modifier_keys_down:
+                    self.mask_modifier_on_release = False
+                self.modifier_keys_down.add(event.vkCode)
             if event.vkCode == w.VK_ESCAPE:
                 if up and self.eat_escape_up:
                     self.eat_escape_up = False
@@ -170,15 +239,15 @@ class Hooks(threading.Thread):
                         self.submit("finish", self.gesture.serial, "escape (keep result)", self.latest_position[1])
                         self.gesture = None
                     return 1
-            if up and is_alt:
+            if up and is_modifier:
                 if self.gesture:
-                    self.submit("finish", self.gesture.serial, "alt released", self.latest_position[1])
+                    self.submit("finish", self.gesture.serial, f"{self.drag_modifier.lower()} released", self.latest_position[1])
                     self.gesture = None
-                if self.mask_alt_on_release and not mask_alt_menu():
+                if self.mask_modifier_on_release and not mask_alt_menu():
                     self.submit("mask_failed", C.get_last_error())
-                self.alt_keys_down.discard(event.vkCode)
-                if not self.alt_keys_down:
-                    self.mask_alt_on_release = False
+                self.modifier_keys_down.discard(event.vkCode)
+                if not self.modifier_keys_down:
+                    self.mask_modifier_on_release = False
         except Exception as exc:
             self._fail(exc)
         return w.CallNextHookEx(None, code, message, pointer)
@@ -187,7 +256,7 @@ class Hooks(threading.Thread):
         mouse = keyboard = None
         try:
             self.tid = w.GetCurrentThreadId()
-            self.alt_keys_down = {vk for vk in (w.VK_LMENU, w.VK_RMENU) if w.key_down(vk)}
+            self.modifier_keys_down = {vk for vk in self.modifier_keys if vk != w.VK_MENU and w.key_down(vk)}
             self.shortcuts.down = {vk for vk in MODIFIERS if vk not in (0x10, 0x11, 0x12) and w.key_down(vk)}
             self.shortcuts.down.update(vk for _, vk in self.shortcuts.bindings if w.key_down(vk))
             msg = W.MSG()
@@ -205,12 +274,15 @@ class Hooks(threading.Thread):
                 if msg.message == w.WM_APP_RESET:
                     if self.gesture and self.gesture.serial == msg.wParam:
                         self.gesture = None
+                elif msg.message == w.WM_TIMER and msg.wParam == self.shortcut_timer:
+                    self._poll_deferred_shortcut()
                 else:
                     w.TranslateMessage(C.byref(msg))
                     w.DispatchMessage(C.byref(msg))
         except Exception as exc:
             self._fail(exc)
         finally:
+            self._clear_deferred_shortcut()
             for handle in (keyboard, mouse):
                 if handle and not w.UnhookWindowsHookEx(handle):
                     self.error = OSError(C.get_last_error(), "UnhookWindowsHookEx failed")

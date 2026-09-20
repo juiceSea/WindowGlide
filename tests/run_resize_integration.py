@@ -7,7 +7,7 @@ import time
 import ctypes as C
 from ctypes import wintypes as W
 
-from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor
+from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor, gesture_config_arguments
 from windowglide.window_manager import rect, visible_rect, tracking_limits
 
 
@@ -36,7 +36,7 @@ def run():
         w.SetForegroundWindow(hwnd)
         wait_for(lambda: w.GetForegroundWindow() == hwnd, "fixture foreground")
         with log_file.open("w", encoding="utf-8") as output:
-            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "60"],
+            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "60"] + gesture_config_arguments("resize"),
                                    stdout=output, stderr=output)
             wait_for(lambda: "READY" in log_file.read_text(encoding="utf-8"), "application ready")
 

@@ -7,7 +7,7 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WindowGlide: Alt + left to move, Alt + right to resize")
+    parser = argparse.ArgumentParser(description="WindowGlide: configured Alt/Win + left to move, + right to resize")
     parser.add_argument("--stop", action="store_true", help="Safely stop the running instance")
     parser.add_argument("--smoke-seconds", type=float, default=0, help="Exit automatically after a startup smoke test")
     parser.add_argument("--test-input", action="store_true", help=argparse.SUPPRESS)

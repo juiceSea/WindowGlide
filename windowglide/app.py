@@ -90,6 +90,21 @@ class Application:
             if self.window_actions:
                 self.window_actions.handle_event(*args)
             return
+        if kind == "shortcut_cancelled":
+            log.info("Synthetic shortcut %s cancelled: %s", *args)
+            return
+        if kind == "deferred_shortcut":
+            action, hwnd, pid, tid = args
+            target = Target(hwnd, pid, tid, "")
+            if not target.alive() or w.GetForegroundWindow() != hwnd:
+                log.info("Synthetic shortcut %s cancelled before dispatch: target or foreground changed", action)
+                return
+            # Do not enqueue a stale deferred action behind an earlier animation.
+            if self.window_actions and self.window_actions.pending:
+                log.info("Synthetic shortcut %s cancelled: previous window action still pending", action)
+                return
+            log.info("Synthetic shortcut %s dispatch after input release hwnd=0x%X", action, hwnd)
+            kind, args = "shortcut", [action, hwnd]
         if kind == "shortcut":
             self.finish("window shortcut")
             if self.window_actions:
@@ -108,7 +123,7 @@ class Application:
         if kind == "hook_error":
             raise RuntimeError(f"Input hook failed: {args[0]}")
         if kind == "mask_failed":
-            log.warning("Alt menu mask was not fully delivered (error=%s); physical Alt release passed through", args[0])
+            log.warning("Alt/Win menu mask was not fully delivered (error=%s); physical key release passed through", args[0])
             return
         if kind == "armed":
             serial, hwnd, origin = args[:3]
@@ -163,11 +178,12 @@ class Application:
         s = self.session
         if not s:
             return
+        modifier_keys = (w.VK_MENU,) if self.settings.drag_modifier == "Alt" else (0x5B, 0x5C)
         if not s.target.alive() or w.IsIconic(s.target.hwnd):
             self.finish("target closed or minimized")
         elif w.IsHungAppWindow(s.target.hwnd):
             self.finish("target stopped responding")
-        elif not w.key_down(w.VK_MENU):
+        elif not any(w.key_down(vk) for vk in modifier_keys):
             self.finish("modifier no longer held")
         elif s.operation and s.foreground != w.GetForegroundWindow():
             self.finish("foreground changed")
@@ -264,12 +280,13 @@ class Application:
                          self.settings.shortcut_minimize, self.settings.shortcut_restore, self.settings.shortcut_maximize)
             else:
                 log.info("Window shortcuts disabled")
-            self.hooks = Hooks(self.hwnd, self.commands, self.test_input, bindings_for(self.settings))
+            self.hooks = Hooks(self.hwnd, self.commands, self.test_input, bindings_for(self.settings),
+                               drag_modifier=self.settings.drag_modifier)
             self.hooks.start()
             if not self.hooks.ready.wait(5) or self.hooks.error:
                 raise RuntimeError(f"Hook registration failed: {self.hooks.error}")
-            log.info("READY pid=%s hooks=mouse,keyboard DPI=PerMonitorV2 exit=Ctrl+Win+Alt+Q test_input=%s",
-                     w.GetCurrentProcessId(), self.test_input)
+            log.info("READY pid=%s hooks=mouse,keyboard DPI=PerMonitorV2 exit=Ctrl+Win+Alt+Q test_input=%s drag_modifier=%s",
+                     w.GetCurrentProcessId(), self.test_input, self.settings.drag_modifier)
             if self.smoke_seconds:
                 w.check(w.SetTimer(self.hwnd, 2, int(self.smoke_seconds * 1000), None), "SetTimer(smoke)")
             msg = W.MSG()

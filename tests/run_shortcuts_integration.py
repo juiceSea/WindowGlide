@@ -1,18 +1,19 @@
 """Opt-in real Win32 shortcut checks; all manipulated windows are owned fixtures."""
 
 import ctypes as C
+import argparse
 from ctypes import wintypes as W
 import json
 import subprocess
 import sys
 import time
 
-from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor
+from run_windows_integration import ROOT, w, wait_for, mouse, key, set_cursor, gesture_config_arguments, INPUT, KEYBDINPUT, send_input
 from windowglide.window_manager import rect
 from windowglide.overlay import GLASS_CLASS
 
 
-def run():
+def run(modifier="Alt"):
     w.dpi_awareness()
     if w.FindWindow(w.CLASS_NAME, None) or any(w.key_down(vk) for vk in (1, 2, 16, 17, 18, 0x5B, 0x5C)):
         raise RuntimeError("Stop WindowGlide and release mouse/modifier keys first")
@@ -60,6 +61,9 @@ def run():
             for vk in release_order:
                 key(vk, True)
             assert not any(w.key_down(vk) for vk in (17, 18, 0x5B, 0x5C, ord(letter), 0xE8))
+            # Let deferred dispatch and the 25 ms completion timer settle before
+            # the next test directly changes the fixture's native window state.
+            time.sleep(0.1)
 
         def competitor_messages():
             messages = []
@@ -67,6 +71,13 @@ def run():
             while w.PeekMessage(C.byref(msg), None, w.WM_HOTKEY, w.WM_HOTKEY, 1):
                 messages.append(msg.wParam)
             return messages
+
+        def batch_chord(letter):
+            keys = (0xA2, 0x5B, 0xA4, ord(letter))
+            events = (INPUT * 8)(*[INPUT(type=1, ki=KEYBDINPUT(wVk=vk, dwFlags=flags,
+                                      dwExtraInfo=w.TEST_INPUT_MARKER))
+                                  for vk, flags in ([(vk, 0) for vk in keys] + [(vk, 2) for vk in reversed(keys)])])
+            assert send_input(len(events), events, C.sizeof(INPUT)) == len(events)
 
         # A real competing registered hotkey is installed BEFORE WindowGlide.
         msg = W.MSG()
@@ -77,7 +88,7 @@ def run():
         chord("M")
         wait_for(lambda: 991 in competitor_messages(), "competing shortcut before app")
         with log.open("w", encoding="utf-8") as output:
-            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "90"],
+            app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "90"] + gesture_config_arguments("shortcuts", modifier),
                                    stdout=output, stderr=output)
             wait_for(lambda: "READY" in log.read_text(encoding="utf-8"), "app ready")
             activate(a)
@@ -164,23 +175,34 @@ def run():
             wait_for(lambda: not w.IsIconic(a), "release repeat scenario restored")
             results.append("held key never cascades through windows; all modifier/main-key releases remain unstuck")
 
-            # Existing Alt+left drag must cleanly end when shortcut M occurs.
+            for _ in range(3):
+                activate(a)
+                batch_chord("J")
+                wait_for(lambda: w.IsIconic(a), "batched J minimizes after release")
+                wait_for(lambda: w.GetForegroundWindow() != a, "batched J focus settles")
+                batch_chord("K")
+                wait_for(lambda: not w.IsIconic(a) and w.GetForegroundWindow() == a, "batched K restores")
+            results.append("three single-batch injected J/K cycles complete after release without stale targets")
+
+            # Either configured drag must cleanly end when shortcut M occurs.
             activate(a)
             bounds = rect(a)
             mouse(1, bounds[0] + 180, bounds[1] + 160)
-            key(w.VK_LMENU)
+            key(w.VK_LMENU if modifier == "Alt" else 0x5B)
             mouse(2)
             mouse(1, bounds[0] + 220, bounds[1] + 195)
             wait_for(lambda: w.IsWindowVisible(w.FindWindow(GLASS_CLASS, None)), "drag overlay")
             key(0xA2)
-            key(0x5B)
+            key(0x5B if modifier == "Alt" else w.VK_LMENU)
             key(ord("M"))
             key(ord("M"), True)
+            time.sleep(0.12)
+            assert not w.IsZoomed(a), "Injected M executed before modifier release"
+            for vk in (0x5B, 0xA2, w.VK_LMENU):
+                key(vk, True)
             wait_for(lambda: w.IsZoomed(a), "M during drag")
             wait_for(lambda: not w.IsWindowVisible(w.FindWindow(GLASS_CLASS, None)), "shortcut cleans drag overlay")
             mouse(4)
-            for vk in (0x5B, 0xA2, w.VK_LMENU):
-                key(vk, True)
             results.append("shortcut during mouse drag ends gesture and cleans feedback before window action")
 
             subprocess.run([sys.executable, str(ROOT / "main.py"), "--stop"], check=True, capture_output=True, timeout=5)
@@ -234,4 +256,6 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--modifier", choices=("Alt", "Win"), default="Alt")
+    run(parser.parse_args().modifier)

@@ -1,0 +1,15 @@
+{
+  "border_width": 4,
+  "border_color": "#7C9BC5",
+  "use_windows_accent_color": false,
+  "glass_opacity": 0.20,
+  "adaptive_glass_color": true,
+  "corner_radius": 8,
+  "enable_border": true,
+  "enable_glass": true,
+  "enable_cursor_change": true,
+  "enable_window_shortcuts": true,
+  "shortcut_minimize": "Ctrl+Win+Alt+J",
+  "shortcut_restore": "Ctrl+Win+Alt+K",
+  "shortcut_maximize": "Ctrl+Win+Alt+M"
+}

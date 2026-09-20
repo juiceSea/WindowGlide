@@ -19,6 +19,8 @@ class Gesture:
     origin: tuple[int, int]
     started: bool = False
     kind: str = "move"
+    button: str = "left"
+    requires_shift: bool = False
 
 
 @dataclass
@@ -33,11 +35,12 @@ class DeferredShortcut:
 
 
 class Hooks(threading.Thread):
-    def __init__(self, control_hwnd, commands, test_input=False, shortcuts=None, drag_modifier="Alt"):
+    def __init__(self, control_hwnd, commands, test_input=False, shortcuts=None, drag_modifier="Alt", enable_shift_left_resize=False):
         super().__init__(name="InputHook", daemon=True)
         if drag_modifier not in ("Alt", "Win"):
             raise ValueError('drag_modifier must be "Alt" or "Win"')
         self.drag_modifier = drag_modifier
+        self.enable_shift_left_resize = enable_shift_left_resize
         self.modifier_keys = (w.VK_MENU, w.VK_LMENU, w.VK_RMENU) if drag_modifier == "Alt" else (0x5B, 0x5C)
         self.excluded_modifiers = (0x11, 0x10, 0x5B, 0x5C) if drag_modifier == "Alt" else (0x11, 0x10, w.VK_MENU)
         self.control_hwnd, self.commands = control_hwnd, commands
@@ -136,28 +139,31 @@ class Hooks(threading.Thread):
             if not self._accept(event.flags, event.dwExtraInfo, 1):
                 return w.CallNextHookEx(None, code, message, pointer)
             if message in (w.WM_LBUTTONDOWN, w.WM_RBUTTONDOWN):
-                kind = "move" if message == w.WM_LBUTTONDOWN else "resize"
-                eat_attribute = "eat_left_up" if kind == "move" else "eat_right_up"
+                button = "left" if message == w.WM_LBUTTONDOWN else "right"
+                eat_attribute = "eat_left_up" if button == "left" else "eat_right_up"
                 if self.gesture:
                     # A second button cannot open a menu or switch the active gesture.
                     setattr(self, eat_attribute, True)
                     return 1
                 can_start = not (self.eat_left_up or self.eat_right_up) and any(w.key_down(vk) for vk in self.modifier_keys)
+                shift_resize = self.enable_shift_left_resize and button == "left" and w.key_down(0x10)
+                kind = "resize" if button == "right" or shift_resize else "move"
                 # Avoid AltGr and other modified mouse shortcuts.
-                if can_start and not any(w.key_down(vk) for vk in self.excluded_modifiers):
+                if can_start and not any(w.key_down(vk) for vk in self.excluded_modifiers if not (shift_resize and vk == 0x10)):
                     hwnd = candidate_at(event.pt.x, event.pt.y, resizing=kind == "resize")
                     if hwnd and self.test_input and window_class(hwnd) != "WindowGlide.AutomationFixture":
                         hwnd = None
                     if hwnd:
                         self.serial += 1
-                        self.gesture = Gesture(self.serial, hwnd, (event.pt.x, event.pt.y), kind=kind)
+                        self.gesture = Gesture(self.serial, hwnd, (event.pt.x, event.pt.y), kind=kind,
+                                               button=button, requires_shift=shift_resize)
                         if kind == "resize" or self.drag_modifier == "Win":
                             # Includes inactive resize center and Win clicks without
                             # motion: consumed input must not activate a native menu.
                             self.mask_modifier_on_release = True
                         self.latest_position = (self.serial, self.gesture.origin)
                         setattr(self, eat_attribute, True)
-                        self.submit("armed", self.serial, hwnd, self.gesture.origin, kind)
+                        self.submit("armed", self.serial, hwnd, self.gesture.origin, kind, shift_resize)
                         return 1
             elif message == w.WM_MOUSEMOVE and self.gesture:
                 g = self.gesture
@@ -170,12 +176,12 @@ class Hooks(threading.Thread):
                     self.motion_pending = True
                     self.submit("motion", g.serial)
             elif message in (w.WM_LBUTTONUP, w.WM_RBUTTONUP):
-                kind = "move" if message == w.WM_LBUTTONUP else "resize"
-                eat_attribute = "eat_left_up" if kind == "move" else "eat_right_up"
+                button = "left" if message == w.WM_LBUTTONUP else "right"
+                eat_attribute = "eat_left_up" if button == "left" else "eat_right_up"
                 if not getattr(self, eat_attribute):
                     return w.CallNextHookEx(None, code, message, pointer)
                 setattr(self, eat_attribute, False)
-                if self.gesture and self.gesture.kind == kind:
+                if self.gesture and self.gesture.button == button:
                     point = (event.pt.x, event.pt.y)
                     self.latest_position = (self.gesture.serial, point)
                     self.submit("finish", self.gesture.serial, "mouse released", point)
@@ -224,6 +230,9 @@ class Hooks(threading.Thread):
                     return 1
             if not self._accept(event.flags, event.dwExtraInfo, 0x10):
                 return w.CallNextHookEx(None, code, message, pointer)
+            if up and event.vkCode in (0x10, 0xA0, 0xA1) and self.gesture and self.gesture.requires_shift:
+                self.submit("finish", self.gesture.serial, "shift released", self.latest_position[1])
+                self.gesture = None
             is_modifier = event.vkCode in self.modifier_keys
             if is_modifier and not up:
                 if not self.modifier_keys_down:

@@ -1,5 +1,6 @@
 {
   "drag_modifier": "Win",
+  "enable_shift_left_resize": true,
   "border_width": 4,
   "border_color": "#7C9BC5",
   "use_windows_accent_color": false,

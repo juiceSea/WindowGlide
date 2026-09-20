@@ -4,6 +4,7 @@ Do not use the keyboard or mouse during this test. Restores pointer/focus on exi
 """
 
 import ctypes as C
+import argparse
 from ctypes import wintypes as W
 import json
 import subprocess
@@ -29,7 +30,7 @@ def foreground_process():
         w.CloseHandle(handle)
 
 
-def run():
+def run(shift_left=False):
     w.dpi_awareness()
     if w.FindWindow(w.CLASS_NAME, None) or any(w.key_down(vk) for vk in (1, 2, 16, 17, 18, 0x5B, 0x5C)):
         raise RuntimeError("Stop WindowGlide and release all buttons/modifiers first")
@@ -39,10 +40,11 @@ def run():
     results = []
     destination = ROOT / "test-results"
     destination.mkdir(exist_ok=True)
-    log = destination / "win-app.log"
+    label = "win-shift-left" if shift_left else "win"
+    log = destination / f"{label}-app.log"
     try:
         # File output avoids a fixture pipe filling during the input matrix.
-        with (destination / "win-fixture.jsonl").open("w", encoding="utf-8") as events, log.open("w", encoding="utf-8") as output:
+        with (destination / f"{label}-fixture.jsonl").open("w", encoding="utf-8") as events, log.open("w", encoding="utf-8") as output:
             fixture = subprocess.Popen([sys.executable, str(ROOT / "tests" / "fixture_window.py")], stdout=events, stderr=events)
             hwnd = wait_for(lambda: w.FindWindow("WindowGlide.AutomationFixture", None), "fixture")
             w.SetWindowPos(hwnd, W.HWND(-1), 200, 160, 640, 440, 0x10)
@@ -62,8 +64,13 @@ def run():
             w.SetForegroundWindow(hwnd)
             wait_for(lambda: w.GetForegroundWindow() == hwnd, "native Win UI dismissed")
             results.append(f"Native plain Win baseline: {native_process}")
+            config_args = gesture_config_arguments(label, "Win")
+            config_path = destination / f"{label}-config.json"
+            config_values = json.loads(config_path.read_text(encoding="utf-8"))
+            config_values["enable_shift_left_resize"] = shift_left
+            config_path.write_text(json.dumps(config_values), encoding="utf-8")
             app = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "--test-input", "--smoke-seconds", "90"]
-                                   + gesture_config_arguments("win", "Win"), stdout=output, stderr=output)
+                                   + config_args, stdout=output, stderr=output)
             wait_for(lambda: "READY" in log.read_text(encoding="utf-8"), "Win app ready")
 
             def no_start():
@@ -71,12 +78,17 @@ def run():
                 while time.monotonic() < deadline:
                     assert w.GetForegroundWindow() == hwnd, ("Unexpected foreground after gesture", foreground_process())
                     time.sleep(0.01)
-                assert not any(w.key_down(vk) for vk in (0x5B, 0x5C, 0xE8)), "Latched Win/mask key"
+                assert not any(w.key_down(vk) for vk in (0x10, 0x5B, 0x5C, 0xE8)), "Latched modifier/mask key"
                 assert app.poll() is None
 
             for vk in (0x5B, 0x5C):
                 for button, down, up in (("move", 2, 4), ("resize", 8, 16)):
-                    for ending in ("mouse", "win", "escape", "click", "center"):
+                    use_shift = shift_left and button == "resize"
+                    if use_shift:
+                        down, up = 2, 4
+                    shift_vk = 0xA0 if vk == 0x5B else 0xA1
+                    endings = ("mouse", "win", "escape", "click", "center") + (("shift", "double_tap") if use_shift else ())
+                    for ending in endings:
                         w.SetWindowPos(hwnd, None, 200, 160, 640, 440, 0x4 | 0x10)
                         before = rect(hwnd)
                         x, y = (520, 380) if ending == "center" else (740, 510)
@@ -84,6 +96,12 @@ def run():
                         wait_for(lambda: w.GetAncestor(w.WindowFromPoint(W.POINT(x, y)), 2) == hwnd,
                                  "fixture unobscured after shell transition")
                         key(vk)
+                        if use_shift:
+                            key(shift_vk)
+                        if ending == "double_tap":
+                            mouse(down)
+                            mouse(up)
+                            assert rect(hwnd) == before
                         mouse(down)
                         if ending != "click":
                             mouse(1, x + 40, y + 30)
@@ -102,10 +120,18 @@ def run():
                         elif ending == "escape":
                             key(w.VK_ESCAPE)
                             key(w.VK_ESCAPE, True)
+                        elif ending == "shift":
+                            key(shift_vk, True)
+                            mouse(1, x + 60, y + 60)
+                            assert rect(hwnd) == expected, "Shift release did not stop resize"
+                        before_release = rect(hwnd)
                         mouse(up)
+                        if use_shift and ending != "shift":
+                            key(shift_vk, True)
                         if ending != "win":
                             key(vk, True)
                         no_start()
+                        assert rect(hwnd) == before_release, "Geometry changed after release (possible snapping conflict)"
                         stopped = rect(hwnd)
                         mouse(1, x + 60, y + 60)
                         assert rect(hwnd) == stopped
@@ -123,12 +149,16 @@ def run():
                 results.append(f"{hex(vk)} plain press after gestures retains native action")
 
             assert "mask was not fully delivered" not in log.read_text(encoding="utf-8")
-            (destination / "win-integration.json").write_text(json.dumps({"passed": results}, indent=2), encoding="utf-8")
+            events.flush()
+            recorded = [json.loads(line) for line in (destination / f"{label}-fixture.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert not any(row.get("event") == "enter" for row in recorded), "Unexpected native move/resize loop"
+            results.append("no native move/resize loop or post-release snapping observed")
+            (destination / f"{label}-integration.json").write_text(json.dumps({"passed": results}, indent=2), encoding="utf-8")
             print(json.dumps({"passed": results}, indent=2))
     finally:
         mouse(4)
         mouse(16)
-        for vk in (0x5B, 0x5C, w.VK_ESCAPE):
+        for vk in (0xA0, 0xA1, 0x5B, 0x5C, w.VK_ESCAPE):
             key(vk, True)
         for process, class_name in ((app, w.CLASS_NAME), (fixture, "WindowGlide.AutomationFixture")):
             if process and process.poll() is None:
@@ -146,4 +176,6 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--shift-left", action="store_true")
+    run(parser.parse_args().shift_left)

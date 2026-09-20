@@ -10,6 +10,7 @@ import re
 @dataclass(frozen=True)
 class VisualSettings:
     drag_modifier: str = "Alt"
+    enable_shift_left_resize: bool = False
     border_width: float = 3
     border_color: str = "#7C9BC5"
     use_windows_accent_color: bool = False
@@ -33,7 +34,7 @@ class VisualSettings:
                 raise ValueError(f"{name} must be a finite number between {low} and {high}")
         if not isinstance(self.border_color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", self.border_color):
             raise ValueError("border_color must be a six-digit #RRGGBB color")
-        for name in ("enable_border", "enable_glass", "enable_cursor_change", "use_windows_accent_color", "adaptive_glass_color", "enable_window_shortcuts"):
+        for name in ("enable_border", "enable_glass", "enable_cursor_change", "use_windows_accent_color", "adaptive_glass_color", "enable_window_shortcuts", "enable_shift_left_resize"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be true or false")
         from .shortcuts import bindings_for

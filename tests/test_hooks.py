@@ -93,7 +93,7 @@ class HookTests(unittest.TestCase):
     def test_right_drag_starts_resize_and_consumes_paired_release(self):
         self.key(w.VK_LMENU)
         self.assertEqual(self.mouse(w.WM_RBUTTONDOWN), 1)
-        self.assertEqual(self.hooks.submit.call_args.args[-1], "resize")
+        self.assertEqual(self.hooks.submit.call_args.args[4], "resize")
         self.mouse(w.WM_MOUSEMOVE, 320, 320)
         self.assertEqual(self.mouse(w.WM_RBUTTONUP, 320, 320), 1)
         self.assertIsNone(self.hooks.gesture)
@@ -253,6 +253,93 @@ class WinHookTests(unittest.TestCase):
         self.assertEqual(self.hooks.submit.call_args.args[0], "mask_failed")
         self.assertFalse(self.hooks.modifier_keys_down)
         self.assertFalse(self.hooks.mask_modifier_on_release)
+
+
+class ShiftLeftHookTests(unittest.TestCase):
+    mouse = HookTests.mouse
+    key = HookTests.key
+
+    def setUp(self):
+        WinHookTests.setUp(self)
+        self.hooks.enable_shift_left_resize = True
+        self.physical_down = {0x5B, 0x10}
+
+    def test_shift_left_resizes_and_only_left_release_finishes(self):
+        self.key(0x5B)
+        self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 1)
+        self.assertEqual(self.hooks.gesture.kind, "resize")
+        self.assertEqual(self.hooks.gesture.button, "left")
+        self.assertTrue(self.hooks.gesture.requires_shift)
+        self.mouse(w.WM_MOUSEMOVE, 330, 330)
+        self.assertEqual(self.mouse(w.WM_RBUTTONDOWN), 1)
+        self.assertEqual(self.mouse(w.WM_RBUTTONUP), 1)
+        self.assertIsNotNone(self.hooks.gesture)
+        self.assertEqual(self.mouse(w.WM_LBUTTONUP), 1)
+        self.assertIsNone(self.hooks.gesture)
+        self.key(0x5B, True)
+        self.mask.assert_called_once()
+
+    def test_each_shift_release_stops_without_switching_to_move(self):
+        for shift in (0x10, 0xA0, 0xA1):
+            with self.subTest(shift=shift):
+                self.key(0x5B)
+                self.mouse(w.WM_LBUTTONDOWN)
+                self.mouse(w.WM_MOUSEMOVE, 330, 330)
+                self.assertEqual(self.key(shift, True), 0)
+                self.assertIsNone(self.hooks.gesture)
+                self.assertEqual(self.hooks.submit.call_args.args[2], "shift released")
+                self.assertEqual(self.mouse(w.WM_LBUTTONUP), 1)
+                self.key(0x5B, True)
+
+    def test_double_tap_first_click_does_not_start_geometry_then_second_drag_resizes(self):
+        self.key(0x5B)
+        self.mouse(w.WM_LBUTTONDOWN)
+        self.mouse(w.WM_LBUTTONUP)
+        self.assertNotIn("start", [call.args[0] for call in self.hooks.submit.call_args_list])
+        self.mouse(w.WM_LBUTTONDOWN)
+        self.mouse(w.WM_MOUSEMOVE, 330, 330)
+        self.assertEqual(self.hooks.gesture.kind, "resize")
+        self.assertTrue(self.hooks.gesture.started)
+
+    def test_opt_out_and_extra_modifiers_pass_through(self):
+        self.hooks.enable_shift_left_resize = False
+        self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 0)
+        self.hooks.enable_shift_left_resize = True
+        for keys in ({0x10}, {0x5B, 0x10, 0x11}, {0x5B, 0x10, w.VK_MENU}):
+            self.physical_down = keys
+            self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 0)
+        self.assertIsNone(self.hooks.gesture)
+
+    def test_nonresizable_window_does_not_fall_back_to_moving(self):
+        with patch("windowglide.hooks.candidate_at", return_value=None) as candidate:
+            self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 0)
+            candidate.assert_called_once_with(300, 300, resizing=True)
+        self.hooks.submit.assert_not_called()
+
+    def test_regular_move_does_not_change_kind_when_shift_pressed_later(self):
+        self.physical_down = {0x5B}
+        self.mouse(w.WM_LBUTTONDOWN)
+        self.physical_down.add(0x10)
+        self.key(0xA0)
+        self.mouse(w.WM_MOUSEMOVE, 330, 330)
+        self.assertEqual(self.hooks.gesture.kind, "move")
+        self.key(0xA0, True)
+        self.assertIsNotNone(self.hooks.gesture)
+
+    def test_alt_setting_uses_alt_shift_left(self):
+        self.hooks = Hooks(123, queue.SimpleQueue(), drag_modifier="Alt", enable_shift_left_resize=True)
+        self.hooks.submit = Mock()
+        self.physical_down = {w.VK_MENU, 0x10}
+        self.assertEqual(self.mouse(w.WM_LBUTTONDOWN), 1)
+        self.assertEqual(self.hooks.gesture.kind, "resize")
+        self.assertEqual(self.mouse(w.WM_LBUTTONUP), 1)
+
+    def test_normal_clicks_shift_clicks_and_wheel_are_not_consumed(self):
+        for held in (set(), {0x10}):
+            self.physical_down = held
+            for message in (w.WM_LBUTTONDOWN, w.WM_LBUTTONUP, w.WM_RBUTTONDOWN, w.WM_RBUTTONUP, 0x20A, 0x20E):
+                self.assertEqual(self.mouse(message), 0)
+        self.hooks.submit.assert_not_called()
 
 
 if __name__ == "__main__":

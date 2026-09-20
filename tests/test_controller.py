@@ -94,6 +94,22 @@ class ControllerTests(unittest.TestCase):
             self.app._command(("deferred_shortcut", "minimize", 456, 10, 20))
         self.app.window_actions.execute.assert_called_once_with("minimize", 456)
 
+    def test_shift_resize_watchdog_requires_shift_but_regular_move_does_not(self):
+        self.app.settings = VisualSettings(drag_modifier="Win", enable_shift_left_resize=True)
+        self.app.session.foreground = 456
+        with patch.object(Target, "alive", return_value=True), \
+             patch("windowglide.app.w.IsIconic", return_value=False), \
+             patch("windowglide.app.w.IsHungAppWindow", return_value=False), \
+             patch("windowglide.app.w.GetForegroundWindow", return_value=456), \
+             patch("windowglide.app.w.key_down", side_effect=lambda vk: vk == 0x5B), \
+             patch.object(self.app, "_sync_feedback"), \
+             patch.object(self.app, "finish") as finish:
+            self.app._watchdog()
+            finish.assert_not_called()
+            self.app.session.requires_shift = True
+            self.app._watchdog()
+            finish.assert_called_once_with("shift no longer held")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,13 @@ from windowglide.config import VisualSettings, load_config
 
 
 class VisualConfigTests(unittest.TestCase):
+    def test_shift_left_resize_is_opt_in_and_boolean(self):
+        self.assertFalse(VisualSettings().enable_shift_left_resize)
+        self.assertTrue(VisualSettings(enable_shift_left_resize=True).enable_shift_left_resize)
+        for value in (1, None, "true"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                VisualSettings(enable_shift_left_resize=value)
+
     def test_drag_modifier_is_explicit_and_old_configs_keep_alt(self):
         self.assertEqual(VisualSettings().drag_modifier, "Alt")
         for modifier in ("Alt", "Win"):

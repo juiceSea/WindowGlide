@@ -27,6 +27,7 @@ class Session:
     foreground: int | None = None
     kind: str = "move"
     glass_color: str = "#FFFFFF"
+    requires_shift: bool = False
 
 
 class AlreadyRunning(RuntimeError):
@@ -135,7 +136,8 @@ class Application:
                 log.info("Target skipped hwnd=0x%X reason=%s", hwnd, exc)
                 self.hooks.reset(serial)
                 return
-            self.session = Session(serial, target, origin, kind=operation_kind)
+            self.session = Session(serial, target, origin, kind=operation_kind,
+                                   requires_shift=bool(args[4]) if len(args) > 4 else False)
             w.check(w.SetTimer(self.hwnd, 1, 100, None), "SetTimer(active watchdog)")
             log.info("%s armed hwnd=0x%X title=%r", operation_kind.capitalize(), hwnd, target.title)
             return
@@ -185,6 +187,8 @@ class Application:
             self.finish("target stopped responding")
         elif not any(w.key_down(vk) for vk in modifier_keys):
             self.finish("modifier no longer held")
+        elif s.requires_shift and not w.key_down(0x10):
+            self.finish("shift no longer held")
         elif s.operation and s.foreground != w.GetForegroundWindow():
             self.finish("foreground changed")
         else:
@@ -281,7 +285,8 @@ class Application:
             else:
                 log.info("Window shortcuts disabled")
             self.hooks = Hooks(self.hwnd, self.commands, self.test_input, bindings_for(self.settings),
-                               drag_modifier=self.settings.drag_modifier)
+                               drag_modifier=self.settings.drag_modifier,
+                               enable_shift_left_resize=self.settings.enable_shift_left_resize)
             self.hooks.start()
             if not self.hooks.ready.wait(5) or self.hooks.error:
                 raise RuntimeError(f"Hook registration failed: {self.hooks.error}")
